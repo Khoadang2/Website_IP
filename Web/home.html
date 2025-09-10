@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Quản lý IP cố định</title>
+  <link rel="icon" type="image/png" href="../Web/assets/lai_yih_logo.png">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div style="display:flex;align-items:center;gap:10px">
+      <button id="menuToggle" class="menu-btn" aria-label="Mở menu">☰</button>
+      <div>
+        <h1 onclick="logout()" style="cursor:pointer">Quản lý IP cố định</h1>
+        <div class="sub mobile-hide">Quản lý: server, wifi, máy in, máy chấm công — IP online hiển thị đèn xanh</div>
+      </div>
+    </div>
+     <div class="controls">
+      <button id="addBtn" class="primary">+ Thêm thiết bị</button>
+      <span class="demo-badge">Mode: On</span>
+      <button id="scanBtn" class="primary menu-scan">Quét mạng (Scan)</button>
+      <button id="autoBtn" class="primary mobile-hide">Bật auto-refresh</button>
+      <button id="exportBtn" class="alt-btn mobile-hide">Xuất Excel</button>
+      <input type="file" id="importFile" accept=".xlsx,.xls" style="display:none" />
+      <button id="importBtn" class="alt-btn mobile-hide">Nhập Excel</button>
+    </div>
+  </header>
+
+  <div class="grid">
+    <!-- Sidebar (mobile only range input) -->
+    <aside id="sidebar" class="card sidebar">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h3 class="sidebar-title">Bộ lọc & Tìm kiếm</h3>
+        <button class="close-sidebar" id="closeSidebarBtn" aria-label="Đóng menu">✕</button>
+      </div>
+
+      <label>Lọc theo loại</label>
+      <select id="typeFilter">
+        <option value="all">Tất cả</option>
+        <option value="server">Server</option>
+        <option value="wifi">Wifi</option>
+        <option value="printer">Printer</option>
+        <option value="att">Máy chấm công</option>
+        <option value="andong">QC An Dong</option>
+        <option value="website">WebSite</option>
+        <option value="other">Khác</option>
+      </select>
+
+      <label>Tìm kiếm (tên hoặc IP)</label>
+      <input id="searchInput" type="text" placeholder="VD: Server, 192.168.78.10" />
+
+      <div class="stats" style="margin-top:12px">
+        <div id="statTotal" class="stat">
+          <div class="sub">Tổng</div>
+          <div id="totalCount" class="stat-num">-</div>
+        </div>
+        <div id="statOnline" class="stat">
+          <div class="sub">Online</div>
+          <div id="onlineCount" class="stat-num online">-</div>
+        </div>
+        <div id="statOffline" class="stat">
+          <div class="sub">Offline</div>
+          <div id="offlineCount" class="stat-num offline">-</div>
+        </div>
+      </div>
+
+      <!-- Range input only on mobile -->
+      <div class="scan-range mobile-only">
+        <div class="sub">Phạm vi quét (ví dụ: 192.168.78.1-254)</div>
+        <input id="rangeInput" type="text" placeholder="192.168.78.1-254" />
+      </div>
+    </aside>
+
+    <!-- Overlay for sidebar -->
+    <div id="overlay" class="overlay" onclick="closeSidebar()" aria-hidden="true"></div>
+
+    <main class="card">
+      <!-- Desktop-only range input -->
+      <div class="scan-range desktop-only" style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+   
+          <div class="sub">Phạm vi quét (ví dụ: 192.168.78.1-254)</div>
+          <input id="rangeInputDesktop" type="text" placeholder="192.168.78.1-254" style="max-width:260px"/>
+       
+          <div style="flex:1"></div>
+        <!-- Auto status always on right -->
+        <div class="sub">Auto: <span id="autoState">Tắt</span></div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+          <tr>
+            <th class="col-small" onclick="sortTable('status')">Trạng thái ▲▼</th>
+            <th class="col-small" onclick="sortTable('name')">Tên thiết bị ▲▼</th>
+            <th class="col-small" onclick="sortTable('type')">Loại ▲▼</th>
+            <th class="col-small" onclick="sortTable('ip')">IP ▲▼</th>
+            <th class="col-small" onclick="sortTable('dep')">Đơn vị ▲▼</th>
+            <th class="col-small" onclick="sortTable('note')">Ghi chú ▲▼</th>
+            <th class="col-small">Link</th>
+            <th class="col-small">Chỉnh sửa</th>
+          </tr>
+          </thead>
+          <tbody id="deviceBody"></tbody>
+        </table>
+      </div>
+
+      <div id="loadingOverlay">
+        <div class="spinner"></div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>

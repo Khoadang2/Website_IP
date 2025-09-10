@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Đăng nhập hệ thống</title>
+
+  <!-- Favicon hiển thị trên tab trình duyệt -->
+  <link rel="icon" type="image/png" href="../Web/assets/lai_yih_logo.png">
+
+  <style>
+    body {
+      font-family: "Segoe UI", Arial, sans-serif;
+      background: linear-gradient(135deg, #e0f7fa, #e3f2fd);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+    }
+
+    .login-box {
+      background: #fff;
+      padding: 40px 35px;
+      border-radius: 12px;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.15);
+      width: 360px;
+      text-align: center;
+      animation: fadeIn 0.6s ease;
+    }
+
+    .login-box img {
+      width: 80px;
+      margin-bottom: 15px;
+    }
+
+    .login-box h2 {
+      margin-bottom: 25px;
+      font-size: 20px;
+      font-weight: 600;
+      color: #333;
+    }
+
+    .input-group {
+      display: flex;
+      align-items: center;
+      margin: 10px 0;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      padding: 10px;
+      background: #fafafa;
+    }
+
+    .input-group i {
+      margin-right: 8px;
+      color: #666;
+    }
+
+    .input-group input {
+      border: none;
+      outline: none;
+      flex: 1;
+      font-size: 14px;
+      background: transparent;
+    }
+
+    button {
+      width: 100%;
+      padding: 12px;
+      background: #007bff;
+      border: none;
+      border-radius: 6px;
+      color: #fff;
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      margin-top: 15px;
+      transition: 0.3s;
+    }
+
+    button:hover {
+      background: #0056b3;
+    }
+
+    .msg {
+      margin-top: 15px;
+      font-size: 14px;
+      font-weight: 500;
+      min-height: 20px;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+  <div class="login-box">
+    <!-- Logo công ty -->
+    <img src="../Web/assets/lai_yih_logo.png" alt="Logo">
+    <h2>Đăng nhập hệ thống</h2>
+    
+    <div class="input-group">
+      <i class="fa fa-user"></i>
+      <input type="text" id="userid" placeholder="Tên đăng nhập" autocomplete="off">
+    </div>
+    
+    <div class="input-group">
+      <i class="fa fa-lock"></i>
+      <input type="password" id="pwd" placeholder="Mật khẩu" autocomplete="off">
+    </div>
+    
+    <button onclick="login()"><i class="fa fa-sign-in-alt"></i> Đăng nhập</button>
+    <div class="msg" id="msg"></div>
+  </div>
+
+<script>
+  async function login() {
+    const userid = document.getElementById("userid").value.trim();
+    const pwd = document.getElementById("pwd").value.trim();
+    const msgEl = document.getElementById("msg");
+
+    if (!userid || !pwd) {
+      msgEl.style.color = "red";
+      msgEl.textContent = "⚠️ Vui lòng nhập đầy đủ thông tin";
+      return;
+    }
+
+    try {
+      const API_BASE = window.location.origin.replace(":5500", ":5501");
+
+      const res = await fetch(`${API_BASE}/api/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userid, pwd })
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        msgEl.style.color = "green";
+        msgEl.textContent = "✅ Đăng nhập thành công!";
+        localStorage.setItem("user", JSON.stringify(data.user));
+        setTimeout(() => { window.location.href = "home.html"; }, 1000);
+      } else {
+        msgEl.style.color = "red";
+        msgEl.textContent = "❌ " + (data.message || "Sai tài khoản/mật khẩu");
+      }
+    } catch (err) {
+      console.error(err);
+      msgEl.style.color = "red";
+      msgEl.textContent = "❌ Không kết nối được server";
+    }
+  }
+
+  document.addEventListener("keypress", e => {
+    if (e.key === "Enter") login();
+  });
+</script>
+</body>
+</html>
