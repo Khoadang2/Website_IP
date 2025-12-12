@@ -60,12 +60,14 @@ const upload = multer({
     filename: (req, file, cb) => {
       const ext = path.extname(file.originalname);
       cb(null, `import_${Date.now()}${ext}`);
-    }
+    },
   }),
   fileFilter: (req, file, cb) => {
-    const ok = [".xlsx", ".xls"].includes(path.extname(file.originalname).toLowerCase());
+    const ok = [".xlsx", ".xls"].includes(
+      path.extname(file.originalname).toLowerCase()
+    );
     cb(ok ? null : new Error("Chỉ nhận file .xlsx/.xls"), ok);
-  }
+  },
 });
 
 // ===================== HÀM KIỂM TRA HOST (CÂN BẰNG TỐC ĐỘ & ĐỘ CHÍNH XÁC) =====================
@@ -73,28 +75,30 @@ async function checkHost(ip, timeoutMs = 400) {
   try {
     // Chiến lược: Check port trước (nhanh), rồi mới ping
     // Vì port check nhanh hơn ping rất nhiều
-    
+
     // 1. Thử check các port phổ biến song song
     const portChecks = [
-      checkHostPort(ip, 80, timeoutMs),   // HTTP
-      checkHostPort(ip, 443, timeoutMs),  // HTTPS
-      checkHostPort(ip, 3389, timeoutMs)  // RDP
+      checkHostPort(ip, 80, timeoutMs), // HTTP
+      checkHostPort(ip, 443, timeoutMs), // HTTPS
+      checkHostPort(ip, 3389, timeoutMs), // RDP
     ];
-    
+
     // Race: port nào respond trước thì return luôn
     const portResult = await Promise.race([
-      Promise.any(portChecks).then(() => true).catch(() => false),
-      new Promise(resolve => setTimeout(() => resolve(false), timeoutMs))
+      Promise.any(portChecks)
+        .then(() => true)
+        .catch(() => false),
+      new Promise((resolve) => setTimeout(() => resolve(false), timeoutMs)),
     ]);
-    
+
     if (portResult) return true;
-    
+
     // 2. Nếu không có port nào mở, thử ping (cho các thiết bị không có service)
-    const pingResult = await ping.promise.probe(ip, { 
-      timeout: 0.6,  // 600ms cho ping
-      min_reply: 1 
+    const pingResult = await ping.promise.probe(ip, {
+      timeout: 0.6, // 600ms cho ping
+      min_reply: 1,
     });
-    
+
     return pingResult && pingResult.alive;
   } catch (e) {
     return false;
@@ -105,7 +109,7 @@ function checkHostPort(ip, port, timeout = 400) {
   return new Promise((resolve, reject) => {
     const socket = new net.Socket();
     let done = false;
-    
+
     socket.setTimeout(timeout);
     socket.setNoDelay(true);
 
@@ -121,7 +125,7 @@ function checkHostPort(ip, port, timeout = 400) {
       if (!done) {
         done = true;
         socket.destroy();
-        reject(new Error('timeout'));
+        reject(new Error("timeout"));
       }
     });
 
@@ -129,7 +133,7 @@ function checkHostPort(ip, port, timeout = 400) {
       if (!done) {
         done = true;
         socket.destroy();
-        reject(new Error('error'));
+        reject(new Error("error"));
       }
     });
 
@@ -150,10 +154,10 @@ app.post("/api/login", async (req, res) => {
   const { userid, pwd } = req.body;
   try {
     const pool = await poolLogin;
-    const result = await pool.request()
+    const result = await pool
+      .request()
       .input("user", sql.VarChar, userid)
-      .input("pass", sql.VarChar, pwd)
-      .query(`
+      .input("pass", sql.VarChar, pwd).query(`
         SELECT TOP (1) [USERID], [PWD]
         FROM [dbo].[Busers]
         WHERE USERID = @user AND PWD = @pass
@@ -187,7 +191,8 @@ app.post("/api/devices", async (req, res) => {
   const { name, type, ip, dep, note, status, port, userid, link } = req.body;
   try {
     const pool = await poolWEB;
-    await pool.request()
+    await pool
+      .request()
       .input("name", sql.NVarChar, name)
       .input("type", sql.NVarChar, type)
       .input("ip", sql.NVarChar, ip)
@@ -197,8 +202,7 @@ app.post("/api/devices", async (req, res) => {
       .input("port", sql.Int, port || null)
       .input("userid", sql.VarChar, userid || "import/batch")
       .input("link", sql.NVarChar, link || "")
-      .input("date", sql.DateTime, new Date())
-      .query(`
+      .input("date", sql.DateTime, new Date()).query(`
         INSERT INTO devices (name, type, ip, dep, note, status, port, userid, link, date)
         VALUES (@name,@type,@ip,@dep,@note,@status,@port,@userid,@link,@date)
       `);
@@ -214,7 +218,8 @@ app.put("/api/devices/:id", async (req, res) => {
   const { name, type, ip, dep, note, status, port, userid, link } = req.body;
   try {
     const pool = await poolWEB;
-    await pool.request()
+    await pool
+      .request()
       .input("id", sql.Int, id)
       .input("name", sql.NVarChar, name)
       .input("type", sql.NVarChar, type)
@@ -225,8 +230,7 @@ app.put("/api/devices/:id", async (req, res) => {
       .input("port", sql.Int, port || null)
       .input("userid", sql.VarChar, userid || "edit")
       .input("link", sql.NVarChar, link || "")
-      .input("date", sql.DateTime, new Date())
-      .query(`
+      .input("date", sql.DateTime, new Date()).query(`
         UPDATE devices 
         SET name=@name,type=@type,ip=@ip,dep=@dep,note=@note,
             status=@status,port=@port,userid=@userid,link=@link,date=@date
@@ -243,7 +247,10 @@ app.delete("/api/devices/:id", async (req, res) => {
   const { id } = req.params;
   try {
     const pool = await poolWEB;
-    await pool.request().input("id", sql.Int, id).query("DELETE FROM devices WHERE id=@id");
+    await pool
+      .request()
+      .input("id", sql.Int, id)
+      .query("DELETE FROM devices WHERE id=@id");
     res.json({ success: true, message: "Xóa thành công" });
   } catch (err) {
     console.error("❌ Delete API error:", err);
@@ -270,36 +277,38 @@ app.post("/api/discover", async (req, res) => {
         SELECT TOP (1000) [id], [name], [type], [ip], [dep], [note], [status], [port], [date], [userid], [link]
         FROM devices
       `);
-      
+
       // Map để lưu trạng thái cần update
       const statusUpdates = new Map();
-      
-      const checks = result.recordset.map(d => limit(async () => {
-        let alive = false;
-        try {
-          if (d.port && d.port > 0) {
-            // Nếu có port cụ thể, check port đó
-            alive = await checkHostPort(d.ip, d.port, 400);
-          } else {
-            // Không có port thì check đầy đủ (ports + ping)
-            alive = await checkHost(d.ip, 400);
+
+      const checks = result.recordset.map((d) =>
+        limit(async () => {
+          let alive = false;
+          try {
+            if (d.port && d.port > 0) {
+              // Nếu có port cụ thể, check port đó
+              alive = await checkHostPort(d.ip, d.port, 400);
+            } else {
+              // Không có port thì check đầy đủ (ports + ping)
+              alive = await checkHost(d.ip, 400);
+            }
+          } catch (e) {
+            alive = false;
           }
-        } catch (e) {
-          alive = false;
-        }
-        
-        // Lưu vào Map để batch update
-        const newStatus = alive ? 1 : 0;
-        if ((d.status ? 1 : 0) !== newStatus) {
-          statusUpdates.set(d.id, newStatus);
-        }
-        
-        return { ...d, status: newStatus };
-      }));
+
+          // Lưu vào Map để batch update
+          const newStatus = alive ? 1 : 0;
+          if ((d.status ? 1 : 0) !== newStatus) {
+            statusUpdates.set(d.id, newStatus);
+          }
+
+          return { ...d, status: newStatus };
+        })
+      );
 
       const updated = await Promise.all(checks);
       devices.push(...updated);
-      
+
       // Batch update DB - fire and forget
       if (statusUpdates.size > 0) {
         setImmediate(async () => {
@@ -308,16 +317,21 @@ app.post("/api/discover", async (req, res) => {
             const updatePromises = [];
             for (const [id, status] of statusUpdates.entries()) {
               updatePromises.push(
-                pool.request()
+                pool
+                  .request()
                   .input("id", sql.Int, id)
                   .input("status", sql.Int, status)
                   .query("UPDATE devices SET status=@status WHERE id=@id")
-                  .catch(e => console.error(`Update error for ID ${id}:`, e.message))
+                  .catch((e) =>
+                    console.error(`Update error for ID ${id}:`, e.message)
+                  )
               );
             }
             await Promise.all(updatePromises);
             const updateTime = ((Date.now() - updateStart) / 1000).toFixed(2);
-            console.log(`📝 Đã cập nhật ${statusUpdates.size} devices vào DB trong ${updateTime}s`);
+            console.log(
+              `📝 Đã cập nhật ${statusUpdates.size} devices vào DB trong ${updateTime}s`
+            );
           } catch (e) {
             console.error("Batch update error:", e);
           }
@@ -330,42 +344,46 @@ app.post("/api/discover", async (req, res) => {
       const prefix = parts.slice(0, 3).join(".");
       const last = parts[3];
       let start, end;
-      
+
       if (last.includes("-")) {
-        [start, end] = last.split("-").map(v => parseInt(v, 10));
+        [start, end] = last.split("-").map((v) => parseInt(v, 10));
       } else {
         start = end = parseInt(last, 10);
       }
-      
-      if (Number.isNaN(start) || Number.isNaN(end)) throw new Error("Range không hợp lệ");
+
+      if (Number.isNaN(start) || Number.isNaN(end))
+        throw new Error("Range không hợp lệ");
 
       const tasks = [];
       for (let i = start; i <= end; i++) {
         const ipAddr = `${prefix}.${i}`;
-        tasks.push(limit(async () => {
-          const alive = await checkHost(ipAddr, 400);
-          const dbCheck = await pool.request()
-            .input("ip", sql.NVarChar, ipAddr)
-            .query("SELECT TOP 1 * FROM devices WHERE ip=@ip");
-            
-          if (dbCheck.recordset.length > 0) {
-            return { ...dbCheck.recordset[0], status: alive ? 1 : 0 };
-          } else {
-            return {
-              id: null,
-              name: "-",
-              type: "-",
-              ip: ipAddr,
-              dep: "-",
-              note: alive ? "Đang online" : "Không phản hồi",
-              status: alive ? 1 : 0,
-              port: null,
-              date: null,
-              userid: null,
-              link: null
-            };
-          }
-        }));
+        tasks.push(
+          limit(async () => {
+            const alive = await checkHost(ipAddr, 400);
+            const dbCheck = await pool
+              .request()
+              .input("ip", sql.NVarChar, ipAddr)
+              .query("SELECT TOP 1 * FROM devices WHERE ip=@ip");
+
+            if (dbCheck.recordset.length > 0) {
+              return { ...dbCheck.recordset[0], status: alive ? 1 : 0 };
+            } else {
+              return {
+                id: null,
+                name: "-",
+                type: "-",
+                ip: ipAddr,
+                dep: "-",
+                note: alive ? "Đang online" : "Không phản hồi",
+                status: alive ? 1 : 0,
+                port: null,
+                date: null,
+                userid: null,
+                link: null,
+              };
+            }
+          })
+        );
       }
 
       const results = await Promise.all(tasks);
@@ -374,8 +392,10 @@ app.post("/api/discover", async (req, res) => {
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
     const speed = (devices.length / elapsed).toFixed(0);
-    const online = devices.filter(d => d.status).length;
-    console.log(`✅ Quét xong ${devices.length} IPs trong ${elapsed}s (${speed} IPs/s) - ${online} online`);
+    const online = devices.filter((d) => d.status).length;
+    console.log(
+      `✅ Quét xong ${devices.length} IPs trong ${elapsed}s (${speed} IPs/s) - ${online} online`
+    );
 
     res.json(devices);
   } catch (err) {
@@ -387,21 +407,36 @@ app.post("/api/discover", async (req, res) => {
 // ===================== EXPORT EXCEL =====================
 app.get("/api/devices/export", async (req, res) => {
   try {
-    const { type = "all", q = "", status = "all", sortField = "name", sortAsc = "1" } = req.query;
+    const {
+      type = "all",
+      q = "",
+      status = "all",
+      sortField = "name",
+      sortAsc = "1",
+    } = req.query;
     const pool = await poolWEB;
     const rs = await pool.request().query("SELECT * FROM devices");
     let list = rs.recordset;
 
     if (type === "other") {
-      list = list.filter(d => !["server", "wifi", "printer", "att", "andong", "website"].includes(d.type));
+      list = list.filter(
+        (d) =>
+          !["server", "wifi", "printer", "att", "andong", "website"].includes(
+            d.type
+          )
+      );
     } else if (type !== "all") {
-      list = list.filter(d => d.type === type);
+      list = list.filter((d) => d.type === type);
     }
 
     const qq = q.trim().toLowerCase();
-    if (qq) list = list.filter(d => (d.name || "").toLowerCase().includes(qq) || (d.ip || "").includes(qq));
-    if (status === "online") list = list.filter(d => d.status);
-    if (status === "offline") list = list.filter(d => !d.status);
+    if (qq)
+      list = list.filter(
+        (d) =>
+          (d.name || "").toLowerCase().includes(qq) || (d.ip || "").includes(qq)
+      );
+    if (status === "online") list = list.filter((d) => d.status);
+    if (status === "offline") list = list.filter((d) => !d.status);
 
     if (sortField) {
       const asc = sortAsc === "1";
@@ -427,10 +462,10 @@ app.get("/api/devices/export", async (req, res) => {
       { header: "Port", key: "port", width: 8 },
       { header: "Đơn vị", key: "dep", width: 16 },
       { header: "Ghi chú", key: "note", width: 30 },
-      { header: "Link", key: "link", width: 24 }
+      { header: "Link", key: "link", width: 24 },
     ];
 
-    list.forEach(d => {
+    list.forEach((d) => {
       ws.addRow({
         status_text: d.status ? "Online" : "Offline",
         name: d.name || "",
@@ -439,14 +474,16 @@ app.get("/api/devices/export", async (req, res) => {
         port: d.port || "",
         dep: d.dep || "",
         note: d.note || "",
-        link: d.link || ""
+        link: d.link || "",
       });
     });
 
     ws.getRow(1).font = { bold: true };
 
-    res.setHeader("Content-Type",
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
     res.setHeader("Content-Disposition", "attachment; filename=devices.xlsx");
 
     await wb.xlsx.write(res);
@@ -460,7 +497,9 @@ app.get("/api/devices/export", async (req, res) => {
 // ===================== IMPORT EXCEL =====================
 app.post("/api/devices/import", upload.single("file"), async (req, res) => {
   if (!req.file) {
-    return res.status(400).json({ success: false, message: "Không có file upload" });
+    return res
+      .status(400)
+      .json({ success: false, message: "Không có file upload" });
   }
 
   const userId = req.headers["x-userid"] || "import";
@@ -471,8 +510,11 @@ app.post("/api/devices/import", upload.single("file"), async (req, res) => {
     await wb.xlsx.readFile(filePath);
     const ws = wb.worksheets[0];
 
-    const cleanHeader = txt =>
-      String(txt || "").replace(/[▲▼\n\r\t]/g, "").trim().toLowerCase();
+    const cleanHeader = (txt) =>
+      String(txt || "")
+        .replace(/[▲▼\n\r\t]/g, "")
+        .trim()
+        .toLowerCase();
 
     const headerTextByCol = {};
     ws.getRow(1).eachCell((cell, colNumber) => {
@@ -481,19 +523,26 @@ app.post("/api/devices/import", upload.single("file"), async (req, res) => {
 
     const detectors = {
       status: ["trạng trạng", "trạng thái", "status", "tình trạng"],
-      name: ["tên thiết bị", "ten thiet bi", "name", "device", "thiết bị", "tên"],
+      name: [
+        "tên thiết bị",
+        "ten thiet bi",
+        "name",
+        "device",
+        "thiết bị",
+        "tên",
+      ],
       type: ["loại", "type", "category"],
       ip: ["ip", "địa chỉ ip", "ip address", "ipaddr", "dia chi ip"],
       port: ["port", "cổng", "cong"],
       dep: ["đơn vị", "department", "dep", "phòng ban", "don vi"],
       note: ["ghi chú", "note", "remark", "comment", "ghi chu"],
-      link: ["link", "url", "hyperlink", "đường dẫn", "lien ket", "duong dan"]
+      link: ["link", "url", "hyperlink", "đường dẫn", "lien ket", "duong dan"],
     };
 
     const colFor = {};
     for (const [colNum, txt] of Object.entries(headerTextByCol)) {
       for (const [field, keys] of Object.entries(detectors)) {
-        if (keys.some(k => txt.includes(k))) {
+        if (keys.some((k) => txt.includes(k))) {
           colFor[field] = parseInt(colNum, 10);
           break;
         }
@@ -505,11 +554,12 @@ app.post("/api/devices/import", upload.single("file"), async (req, res) => {
     }
 
     const pool = await poolWEB;
-    let inserted = 0, skipped = 0;
+    let inserted = 0,
+      skipped = 0;
 
     for (let r = 2; r <= ws.rowCount; r++) {
       const row = ws.getRow(r);
-      const getVal = c => {
+      const getVal = (c) => {
         if (!c) return "";
         const v = row.getCell(c).value;
         if (!v) return "";
@@ -521,7 +571,10 @@ app.post("/api/devices/import", upload.single("file"), async (req, res) => {
 
       const name = getVal(colFor.name);
       const ipRaw = getVal(colFor.ip);
-      if (!ipRaw) { skipped++; continue; }
+      if (!ipRaw) {
+        skipped++;
+        continue;
+      }
 
       let ip = ipRaw;
       let port = colFor.port ? parseInt(getVal(colFor.port)) : null;
@@ -536,15 +589,22 @@ app.post("/api/devices/import", upload.single("file"), async (req, res) => {
       const dep = getVal(colFor.dep);
       const note = getVal(colFor.note);
       const link = getVal(colFor.link);
-      const status = colFor.status ? (String(getVal(colFor.status)).toLowerCase().includes("online") ? 1 : 0) : 0;
+      const status = colFor.status
+        ? String(getVal(colFor.status)).toLowerCase().includes("online")
+          ? 1
+          : 0
+        : 0;
 
-      const check = await pool.request().input("ip", sql.NVarChar, ip)
+      const check = await pool
+        .request()
+        .input("ip", sql.NVarChar, ip)
         .query("SELECT TOP 1 id FROM devices WHERE ip=@ip");
 
       if (check.recordset.length > 0) {
         skipped++;
       } else {
-        await pool.request()
+        await pool
+          .request()
           .input("name", sql.NVarChar, name)
           .input("type", sql.NVarChar, type)
           .input("ip", sql.NVarChar, ip)
@@ -561,20 +621,60 @@ app.post("/api/devices/import", upload.single("file"), async (req, res) => {
       }
     }
 
-    try { fs.unlinkSync(filePath); } catch (e) {}
+    try {
+      fs.unlinkSync(filePath);
+    } catch (e) {}
 
     return res.json({ success: true, inserted, skipped });
   } catch (err) {
-    try { fs.unlinkSync(filePath); } catch (e) {}
+    try {
+      fs.unlinkSync(filePath);
+    } catch (e) {}
     console.error("❌ Import error:", err);
     return res.status(500).json({ success: false, message: err.message });
   }
 });
+function getUrl(line, qc, ledId = 0, action = null) {
+  // Tính port
+  const port = 1000 + (line - 1) * 3 + qc;
+
+  // LED ID 0 → off
+  if (ledId === 0) {
+    return `http://192.168.71.254:${port}/andon/led/0/off`;
+  }
+
+  // LED ID 1-4 → toggle
+  return `http://192.168.71.254:${port}/andon/led/${ledId}/toggle`;
+}
+
+app.get("/api/run/:code", async (req, res) => {
+  const { code } = req.params;
+  const id = req.query.id ? parseInt(req.query.id) : 0;
+
+  const match = code.match(/^l(\d+)q(\d+)$/i);
+  if (!match) return res.status(400).send("Code không hợp lệ");
+
+  const line = parseInt(match[1]);
+  const qc = parseInt(match[2]);
+
+  const url = getUrl(line, qc, id);
+  console.log("→ line:", line, "qc:", qc, "id:", id);
+  console.log("Gọi API nội bộ:", url);
+
+  try {
+    const r = await fetch(url);
+    const data = await r.text();
+    res.send(data);
+  } catch (err) {
+    console.log(err);
+    res.status(500).send("Error calling internal API");
+  }
+});
+
 
 // ===================== START SERVER =====================
-app.listen(5601, () => {
-  console.log("🚀 Server chạy tại http://localhost:5601");
-  console.log("🚀 Server LAN: http://192.168.71.106:5601");
+app.listen(5501, () => {
+  console.log("🚀 Server LAN: 5501");
   console.log(`⚡ IP Concurrency: ${DEFAULT_IP_CONCURRENCY}`);
-  console.log(`⚡ Chiến lược: Check 3 ports (80,443,3389) + Ping fallback - Timeout: 400ms`);
+ 
 });

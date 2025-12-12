@@ -1,7 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router';
 import Login from '../views/Login.vue';
 import Home from '../views/Home.vue';
-
+import AD from '../views/AD.vue';
 const routes = [
   {
     path: '/',
@@ -17,6 +17,11 @@ const routes = [
     name: 'Home',
     component: Home,
     meta: { requiresAuth: true }
+  },
+  {
+    path: '/ad',
+    name: 'AD',
+    component: AD,
   }
 ];
 

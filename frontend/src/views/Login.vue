@@ -46,7 +46,7 @@ export default {
       message: '',
       msgColor: '',
       loading: false,
-      API_BASE: 'http://192.168.71.106:5601'
+      API_BASE: ''
     };
   },
   methods: {

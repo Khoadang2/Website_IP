@@ -247,6 +247,7 @@ export default {
       loadingProgress: '0%',
       loadingMessage: 'Đang quét mạng...',
       newDevice: this.getEmptyDevice(),
+      currentStatusFilter: null, // Lưu trạng thái filter hiện tại
       stats: {
         total: 0,
         online: 0,
@@ -290,7 +291,6 @@ export default {
       this.loadingMessage = 'Đang lọc dữ liệu...';
       this.loadingProgress = '0%';
       
-      // Simulate progress
       let progress = 0;
       const progressInterval = setInterval(() => {
         progress += 10;
@@ -301,7 +301,7 @@ export default {
       setTimeout(() => {
         let list = [...this.devices];
 
-        // Filter by type
+        // Bước 1: Filter by type
         if (this.typeFilter !== 'all') {
           if (this.typeFilter === 'other') {
             list = list.filter(d => !['server', 'wifi', 'printer', 'att', 'andong', 'website'].includes(d.type));
@@ -310,7 +310,7 @@ export default {
           }
         }
 
-        // Filter by search query
+        // Bước 2: Filter by search query
         const q = this.searchQuery.trim().toLowerCase();
         if (q) {
           list = list.filter(d =>
@@ -320,7 +320,20 @@ export default {
           );
         }
 
-        // Sort
+        // Bước 3: Cập nhật stats dựa trên list sau khi filter type và search
+        // (TRƯỚC KHI filter status online/offline)
+        this.stats.total = list.length;
+        this.stats.online = list.filter(d => d.status).length;
+        this.stats.offline = list.filter(d => !d.status).length;
+
+        // Bước 4: Filter by status nếu đang trong chế độ lọc status
+        if (this.currentStatusFilter === 'online') {
+          list = list.filter(d => d.status);
+        } else if (this.currentStatusFilter === 'offline') {
+          list = list.filter(d => !d.status);
+        }
+
+        // Bước 5: Sort
         if (this.sortField) {
           list.sort((a, b) => {
             let v1 = a[this.sortField] ?? '';
@@ -334,15 +347,8 @@ export default {
         }
 
         this.filteredDevices = list;
-        this.updateStats(list);
         this.loading = false;
       }, 600);
-    },
-    
-    updateStats(list) {
-      this.stats.total = list.length;
-      this.stats.online = list.filter(d => d.status).length;
-      this.stats.offline = list.filter(d => !d.status).length;
     },
     
     handleSort(field) {
@@ -430,7 +436,6 @@ export default {
       this.loadingMessage = 'Đang quét mạng...';
       this.loadingProgress = '0%';
       
-      // Simulate scanning progress
       const progressInterval = setInterval(() => {
         const currentProgress = parseInt(this.loadingProgress);
         if (currentProgress < 90) {
@@ -441,6 +446,10 @@ export default {
       try {
         this.devices = await deviceAPI.discover(this.rangeInput.trim());
         this.loadingProgress = '100%';
+        
+        // Chỉ reset status filter, GIỮ NGUYÊN typeFilter và searchQuery
+        this.currentStatusFilter = null;
+        
         this.applyFilters();
       } catch (err) {
         alert('Lỗi khi quét: ' + err.message);
@@ -514,30 +523,20 @@ export default {
     
     handleStatClick(filterStatus) {
       if (filterStatus === null) {
-        this.handleDiscover();
+        // Nhấn "Tổng" -> chỉ reset currentStatusFilter, GIỮ NGUYÊN filter type và search
+        this.currentStatusFilter = null;
+        this.applyFilters();
       } else {
-        this.loading = true;
-        this.loadingMessage = filterStatus === 'online' ? 'Đang lọc thiết bị online...' : 'Đang lọc thiết bị offline...';
-        this.loadingProgress = '0%';
+        // Nhấn "Online" hoặc "Offline" -> toggle filter status
+        if (this.currentStatusFilter === filterStatus) {
+          // Nếu đang lọc cùng loại thì tắt filter
+          this.currentStatusFilter = null;
+        } else {
+          // Nếu chưa lọc hoặc lọc loại khác thì bật filter
+          this.currentStatusFilter = filterStatus;
+        }
         
-        let progress = 0;
-        const progressInterval = setInterval(() => {
-          progress += 15;
-          this.loadingProgress = Math.min(progress, 100) + '%';
-          if (progress >= 100) clearInterval(progressInterval);
-        }, 40);
-        
-        setTimeout(() => {
-          let list = [...this.devices];
-          if (filterStatus === 'online') {
-            list = list.filter(d => d.status);
-          } else if (filterStatus === 'offline') {
-            list = list.filter(d => !d.status);
-          }
-          this.filteredDevices = list;
-          this.updateStats(list);
-          this.loading = false;
-        }, 500);
+        this.applyFilters();
       }
     },
     
