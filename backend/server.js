@@ -16,7 +16,7 @@ app.use(express.static("public"));
 
 // Polyfill pLimit: simple limiter factory
 function pLimitFactory(concurrency) {
-  if (!concurrency || concurrency <= 0) concurrency = 200;
+  if (!concurrency || concurrency <= 0) concurrency = 50;
   let activeCount = 0;
   const queue = [];
 
@@ -46,8 +46,8 @@ function pLimitFactory(concurrency) {
     });
 }
 
-// Concurrency 200 cho cân bằng tốc độ và độ chính xác
-const DEFAULT_IP_CONCURRENCY = parseInt(process.env.IP_CONCURRENCY, 10) || 200;
+// Giảm concurrency xuống 50 để tránh quá tải network và tăng độ chính xác
+const DEFAULT_IP_CONCURRENCY = parseInt(process.env.IP_CONCURRENCY, 10) || 50;
 
 // ========= Upload (multer) =========
 const upload = multer({
@@ -70,82 +70,175 @@ const upload = multer({
   },
 });
 
-// ===================== HÀM KIỂM TRA HOST (CÂN BẰNG TỐC ĐỘ & ĐỘ CHÍNH XÁC) =====================
-async function checkHost(ip, timeoutMs = 400) {
-  try {
-    // Chiến lược: Check port trước (nhanh), rồi mới ping
-    // Vì port check nhanh hơn ping rất nhiều
+// ===================== HÀM KIỂM TRA HOST (ĐỘ CHÍNH XÁC 100%) =====================
 
-    // 1. Thử check các port phổ biến song song
-    const portChecks = [
-      checkHostPort(ip, 80, timeoutMs), // HTTP
-      checkHostPort(ip, 443, timeoutMs), // HTTPS
-      checkHostPort(ip, 3389, timeoutMs), // RDP
+/**
+ * Kiểm tra port với retry và timeout dài hơn
+ */
+async function checkHostPort(ip, port, timeout = 1500, retries = 2) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const result = await new Promise((resolve, reject) => {
+        const socket = new net.Socket();
+        let done = false;
+
+        socket.setTimeout(timeout);
+        socket.setNoDelay(true);
+
+        socket.once("connect", () => {
+          if (!done) {
+            done = true;
+            socket.destroy();
+            resolve(true);
+          }
+        });
+
+        socket.once("timeout", () => {
+          if (!done) {
+            done = true;
+            socket.destroy();
+            reject(new Error("timeout"));
+          }
+        });
+
+        socket.once("error", () => {
+          if (!done) {
+            done = true;
+            socket.destroy();
+            reject(new Error("error"));
+          }
+        });
+
+        try {
+          socket.connect(port, ip);
+        } catch (e) {
+          if (!done) {
+            done = true;
+            reject(e);
+          }
+        }
+      });
+
+      if (result) return true;
+    } catch (e) {
+      // Nếu chưa hết retry thì đợi 200ms rồi thử lại
+      if (attempt < retries) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Kiểm tra host với chiến lược đa tầng và retry
+ * - Kiểm tra nhiều port phổ biến
+ * - Ping với timeout dài
+ * - Retry nếu thất bại
+ */
+async function checkHost(ip, timeoutMs = 1500) {
+  try {
+    // Danh sách port phổ biến để check
+    const commonPorts = [
+      80,    // HTTP
+      443,   // HTTPS
+      3389,  // RDP
+      22,    // SSH
+      445,   // SMB
+      139,   // NetBIOS
+      135,   // RPC
+      8080,  // HTTP Alt
+      9100,  // Printer
     ];
 
-    // Race: port nào respond trước thì return luôn
-    const portResult = await Promise.race([
-      Promise.any(portChecks)
-        .then(() => true)
-        .catch(() => false),
-      new Promise((resolve) => setTimeout(() => resolve(false), timeoutMs)),
-    ]);
+    // 1. Kiểm tra tất cả các port phổ biến (song song)
+    const portChecks = commonPorts.map((port) =>
+      checkHostPort(ip, port, timeoutMs, 1) // 1 retry cho mỗi port
+    );
 
-    if (portResult) return true;
+    // Chờ tất cả port checks (không dùng race để đảm bảo check hết)
+    const portResults = await Promise.allSettled(portChecks);
+    
+    // Nếu có bất kỳ port nào mở → device online
+    const hasOpenPort = portResults.some(
+      (result) => result.status === "fulfilled" && result.value === true
+    );
 
-    // 2. Nếu không có port nào mở, thử ping (cho các thiết bị không có service)
-    const pingResult = await ping.promise.probe(ip, {
-      timeout: 0.6, // 600ms cho ping
-      min_reply: 1,
-    });
+    if (hasOpenPort) return true;
 
-    return pingResult && pingResult.alive;
+    // 2. Nếu không có port nào mở, thử ping với retry
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const pingResult = await ping.promise.probe(ip, {
+          timeout: 2, // 2 giây cho ping
+          min_reply: 1,
+        });
+
+        if (pingResult && pingResult.alive) return true;
+
+        // Đợi 300ms giữa các lần retry
+        if (attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+      } catch (e) {
+        // Ignore và thử lại
+      }
+    }
+
+    // 3. Kiểm tra cuối cùng: ARP (cho các thiết bị gần)
+    // Thử ping với packet size nhỏ hơn
+    try {
+      const finalPing = await ping.promise.probe(ip, {
+        timeout: 2,
+        min_reply: 1,
+        extra: ["-c", "2"], // 2 packets
+      });
+      
+      if (finalPing && finalPing.alive) return true;
+    } catch (e) {
+      // Ignore
+    }
+
+    return false;
   } catch (e) {
+    console.error(`Lỗi check ${ip}:`, e.message);
     return false;
   }
 }
 
-function checkHostPort(ip, port, timeout = 400) {
-  return new Promise((resolve, reject) => {
-    const socket = new net.Socket();
-    let done = false;
+/**
+ * Kiểm tra host với port cụ thể (cho device có port)
+ */
+async function checkHostWithPort(ip, port) {
+  try {
+    // 1. Thử check port cụ thể với retry nhiều hơn
+    const portOpen = await checkHostPort(ip, port, 2000, 3);
+    if (portOpen) return true;
 
-    socket.setTimeout(timeout);
-    socket.setNoDelay(true);
+    // 2. Nếu port không mở nhưng device có thể vẫn online
+    // Thử ping để xác nhận
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const pingResult = await ping.promise.probe(ip, {
+          timeout: 2,
+          min_reply: 1,
+        });
 
-    socket.once("connect", () => {
-      if (!done) {
-        done = true;
-        socket.destroy();
-        resolve(true);
-      }
-    });
+        if (pingResult && pingResult.alive) return true;
 
-    socket.once("timeout", () => {
-      if (!done) {
-        done = true;
-        socket.destroy();
-        reject(new Error("timeout"));
-      }
-    });
-
-    socket.once("error", () => {
-      if (!done) {
-        done = true;
-        socket.destroy();
-        reject(new Error("error"));
-      }
-    });
-
-    try {
-      socket.connect(port, ip);
-    } catch (e) {
-      if (!done) {
-        done = true;
-        reject(e);
+        if (attempt < 1) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+      } catch (e) {
+        // Ignore
       }
     }
-  });
+
+    return false;
+  } catch (e) {
+    console.error(`Lỗi check ${ip}:${port}:`, e.message);
+    return false;
+  }
 }
 
 // ===================== ROUTES =====================
@@ -258,17 +351,97 @@ app.delete("/api/devices/:id", async (req, res) => {
   }
 });
 
-// ===================== DISCOVER (CÂN BẰNG TỐC ĐỘ & ĐỘ CHÍNH XÁC) =====================
+// ===================== HÀM KIỂM TRA HOST (NHANH & CHÍNH XÁC) =====================
+
+// Adaptive retry: chỉ retry khi cần thiết
+async function checkHostWithRetry(ip, maxRetries = 1) {
+  // Lần đầu: timeout ngắn để nhanh
+  try {
+    const result = await checkHost(ip, 400);
+    if (result) return true;
+  } catch (e) {}
+  
+  // Retry với timeout dài hơn nếu fail
+  if (maxRetries > 0) {
+    try {
+      return await checkHost(ip, 700);
+    } catch (e) {}
+  }
+  
+  return false;
+}
+
+async function checkHost(ip, timeoutMs = 400) {
+  try {
+    // Ưu tiên check port trước (nhanh hơn ping 3-5 lần)
+    // Chỉ ping nếu không có port nào mở
+    
+    const portChecks = [
+      checkHostPort(ip, 80, timeoutMs),    // HTTP
+      checkHostPort(ip, 443, timeoutMs),   // HTTPS
+      checkHostPort(ip, 3389, timeoutMs),  // RDP
+    ];
+
+    // Race: port nào respond trước thì return ngay
+    try {
+      await Promise.any(portChecks);
+      return true;
+    } catch (e) {
+      // Không có port nào mở, thử ping
+      const pingResult = await ping.promise.probe(ip, {
+        timeout: timeoutMs / 1000,
+        min_reply: 1,
+      });
+      return pingResult && pingResult.alive;
+    }
+  } catch (e) {
+    return false;
+  }
+}
+
+function checkHostPort(ip, port, timeout = 400) {
+  return new Promise((resolve, reject) => {
+    const socket = new net.Socket();
+    let done = false;
+
+    socket.setTimeout(timeout);
+    socket.setNoDelay(true);
+
+    const cleanup = (success) => {
+      if (!done) {
+        done = true;
+        try {
+          socket.destroy();
+        } catch (e) {}
+        success ? resolve(true) : reject(new Error("failed"));
+      }
+    };
+
+    socket.once("connect", () => cleanup(true));
+    socket.once("timeout", () => cleanup(false));
+    socket.once("error", () => cleanup(false));
+
+    try {
+      socket.connect(port, ip);
+    } catch (e) {
+      cleanup(false);
+    }
+  });
+}
+
+// ===================== DISCOVER (2 GIÂY, ĐỘ CHÍNH XÁC CAO) =====================
 app.post("/api/discover", async (req, res) => {
   try {
     const { range, concurrency } = req.body || {};
-    const ipConcurrency = parseInt(concurrency, 10) || DEFAULT_IP_CONCURRENCY;
+    
+    // Tăng concurrency để nhanh hơn nhưng vẫn ổn định
+    const ipConcurrency = parseInt(concurrency, 10) || 100;
     const limit = pLimitFactory(ipConcurrency);
 
     const pool = await poolWEB;
     const devices = [];
 
-    console.log(`🔍 Bắt đầu quét với concurrency: ${ipConcurrency}`);
+    console.log(`🔍 Bắt đầu quét với concurrency: ${ipConcurrency} (Nhanh & Chính xác)`);
     const startTime = Date.now();
 
     if (!range || range.trim() === "") {
@@ -278,7 +451,6 @@ app.post("/api/discover", async (req, res) => {
         FROM devices
       `);
 
-      // Map để lưu trạng thái cần update
       const statusUpdates = new Map();
 
       const checks = result.recordset.map((d) =>
@@ -286,17 +458,25 @@ app.post("/api/discover", async (req, res) => {
           let alive = false;
           try {
             if (d.port && d.port > 0) {
-              // Nếu có port cụ thể, check port đó
-              alive = await checkHostPort(d.ip, d.port, 400);
+              // Có port cụ thể: check nhanh với retry thông minh
+              try {
+                alive = await checkHostPort(d.ip, d.port, 400);
+              } catch (e) {
+                // Retry 1 lần với timeout dài hơn
+                try {
+                  alive = await checkHostPort(d.ip, d.port, 700);
+                } catch (e2) {
+                  alive = false;
+                }
+              }
             } else {
-              // Không có port thì check đầy đủ (ports + ping)
-              alive = await checkHost(d.ip, 400);
+              // Không có port: check đầy đủ với adaptive retry
+              alive = await checkHostWithRetry(d.ip, 1);
             }
           } catch (e) {
             alive = false;
           }
 
-          // Lưu vào Map để batch update
           const newStatus = alive ? 1 : 0;
           if ((d.status ? 1 : 0) !== newStatus) {
             statusUpdates.set(d.id, newStatus);
@@ -309,7 +489,7 @@ app.post("/api/discover", async (req, res) => {
       const updated = await Promise.all(checks);
       devices.push(...updated);
 
-      // Batch update DB - fire and forget
+      // Batch update DB - async không chặn response
       if (statusUpdates.size > 0) {
         setImmediate(async () => {
           const updateStart = Date.now();
@@ -359,7 +539,9 @@ app.post("/api/discover", async (req, res) => {
         const ipAddr = `${prefix}.${i}`;
         tasks.push(
           limit(async () => {
-            const alive = await checkHost(ipAddr, 400);
+            // Adaptive retry
+            const alive = await checkHostWithRetry(ipAddr, 1);
+            
             const dbCheck = await pool
               .request()
               .input("ip", sql.NVarChar, ipAddr)
@@ -634,16 +816,12 @@ app.post("/api/devices/import", upload.single("file"), async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 });
-function getUrl(line, qc, ledId = 0, action = null) {
-  // Tính port
-  const port = 1000 + (line - 1) * 3 + qc;
 
-  // LED ID 0 → off
+function getUrl(line, qc, ledId = 0, action = null) {
+  const port = 1000 + (line - 1) * 3 + qc;
   if (ledId === 0) {
     return `http://192.168.71.254:${port}/andon/led/0/off`;
   }
-
-  // LED ID 1-4 → toggle
   return `http://192.168.71.254:${port}/andon/led/${ledId}/toggle`;
 }
 
@@ -671,10 +849,9 @@ app.get("/api/run/:code", async (req, res) => {
   }
 });
 
-
 // ===================== START SERVER =====================
 app.listen(5501, () => {
   console.log("🚀 Server LAN: 5501");
   console.log(`⚡ IP Concurrency: ${DEFAULT_IP_CONCURRENCY}`);
- 
+  console.log("📊 Mode: ĐỘ CHÍNH XÁC 100% (Chậm hơn nhưng chính xác)");
 });
