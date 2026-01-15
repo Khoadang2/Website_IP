@@ -14,7 +14,7 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(express.static("public"));
 
-// Polyfill pLimit: simple limiter factory
+// Polyfill pLimit
 function pLimitFactory(concurrency) {
   if (!concurrency || concurrency <= 0) concurrency = 50;
   let activeCount = 0;
@@ -46,10 +46,9 @@ function pLimitFactory(concurrency) {
     });
 }
 
-// Giảm concurrency xuống 50 để tránh quá tải network và tăng độ chính xác
 const DEFAULT_IP_CONCURRENCY = parseInt(process.env.IP_CONCURRENCY, 10) || 50;
 
-// ========= Upload (multer) =========
+// Upload multer
 const upload = multer({
   storage: multer.diskStorage({
     destination: (req, file, cb) => {
@@ -70,11 +69,7 @@ const upload = multer({
   },
 });
 
-// ===================== HÀM KIỂM TRA HOST (ĐỘ CHÍNH XÁC 100%) =====================
-
-/**
- * Kiểm tra port với retry và timeout dài hơn
- */
+// Host check functions
 async function checkHostPort(ip, port, timeout = 1500, retries = 2) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -121,7 +116,6 @@ async function checkHostPort(ip, port, timeout = 1500, retries = 2) {
 
       if (result) return true;
     } catch (e) {
-      // Nếu chưa hết retry thì đợi 200ms rồi thử lại
       if (attempt < retries) {
         await new Promise((resolve) => setTimeout(resolve, 200));
       }
@@ -130,94 +124,21 @@ async function checkHostPort(ip, port, timeout = 1500, retries = 2) {
   return false;
 }
 
-/**
- * Kiểm tra host với chiến lược đa tầng và retry
- * - Kiểm tra nhiều port phổ biến
- * - Ping với timeout dài
- * - Retry nếu thất bại
- */
 async function checkHost(ip, timeoutMs = 1500) {
   try {
-    // Danh sách port phổ biến để check
-    const commonPorts = [
-      80,    // HTTP
-      443,   // HTTPS
-      3389,  // RDP
-      22,    // SSH
-      445,   // SMB
-      139,   // NetBIOS
-      135,   // RPC
-      8080,  // HTTP Alt
-      9100,  // Printer
-    ];
-
-    // 1. Kiểm tra tất cả các port phổ biến (song song)
+    const commonPorts = [80, 443, 3389, 22, 445, 139, 135, 8080, 9100];
     const portChecks = commonPorts.map((port) =>
-      checkHostPort(ip, port, timeoutMs, 1) // 1 retry cho mỗi port
+      checkHostPort(ip, port, timeoutMs, 1)
     );
 
-    // Chờ tất cả port checks (không dùng race để đảm bảo check hết)
     const portResults = await Promise.allSettled(portChecks);
-    
-    // Nếu có bất kỳ port nào mở → device online
     const hasOpenPort = portResults.some(
       (result) => result.status === "fulfilled" && result.value === true
     );
 
     if (hasOpenPort) return true;
 
-    // 2. Nếu không có port nào mở, thử ping với retry
     for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const pingResult = await ping.promise.probe(ip, {
-          timeout: 2, // 2 giây cho ping
-          min_reply: 1,
-        });
-
-        if (pingResult && pingResult.alive) return true;
-
-        // Đợi 300ms giữa các lần retry
-        if (attempt < 2) {
-          await new Promise((resolve) => setTimeout(resolve, 300));
-        }
-      } catch (e) {
-        // Ignore và thử lại
-      }
-    }
-
-    // 3. Kiểm tra cuối cùng: ARP (cho các thiết bị gần)
-    // Thử ping với packet size nhỏ hơn
-    try {
-      const finalPing = await ping.promise.probe(ip, {
-        timeout: 2,
-        min_reply: 1,
-        extra: ["-c", "2"], // 2 packets
-      });
-      
-      if (finalPing && finalPing.alive) return true;
-    } catch (e) {
-      // Ignore
-    }
-
-    return false;
-  } catch (e) {
-    console.error(`Lỗi check ${ip}:`, e.message);
-    return false;
-  }
-}
-
-/**
- * Kiểm tra host với port cụ thể (cho device có port)
- */
-async function checkHostWithPort(ip, port) {
-  try {
-    // 1. Thử check port cụ thể với retry nhiều hơn
-    const portOpen = await checkHostPort(ip, port, 2000, 3);
-    if (portOpen) return true;
-
-    // 2. Nếu port không mở nhưng device có thể vẫn online
-    // Thử ping để xác nhận
-    for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const pingResult = await ping.promise.probe(ip, {
           timeout: 2,
@@ -226,19 +147,42 @@ async function checkHostWithPort(ip, port) {
 
         if (pingResult && pingResult.alive) return true;
 
-        if (attempt < 1) {
+        if (attempt < 2) {
           await new Promise((resolve) => setTimeout(resolve, 300));
         }
-      } catch (e) {
-        // Ignore
-      }
+      } catch (e) {}
     }
+
+    try {
+      const finalPing = await ping.promise.probe(ip, {
+        timeout: 2,
+        min_reply: 1,
+        extra: ["-c", "2"],
+      });
+
+      if (finalPing && finalPing.alive) return true;
+    } catch (e) {}
 
     return false;
   } catch (e) {
-    console.error(`Lỗi check ${ip}:${port}:`, e.message);
+    console.error(`Lỗi check ${ip}:`, e.message);
     return false;
   }
+}
+
+async function checkHostWithRetry(ip, maxRetries = 1) {
+  try {
+    const result = await checkHost(ip, 400);
+    if (result) return true;
+  } catch (e) {}
+
+  if (maxRetries > 0) {
+    try {
+      return await checkHost(ip, 700);
+    } catch (e) {}
+  }
+
+  return false;
 }
 
 // ===================== ROUTES =====================
@@ -351,101 +295,19 @@ app.delete("/api/devices/:id", async (req, res) => {
   }
 });
 
-// ===================== HÀM KIỂM TRA HOST (NHANH & CHÍNH XÁC) =====================
-
-// Adaptive retry: chỉ retry khi cần thiết
-async function checkHostWithRetry(ip, maxRetries = 1) {
-  // Lần đầu: timeout ngắn để nhanh
-  try {
-    const result = await checkHost(ip, 400);
-    if (result) return true;
-  } catch (e) {}
-  
-  // Retry với timeout dài hơn nếu fail
-  if (maxRetries > 0) {
-    try {
-      return await checkHost(ip, 700);
-    } catch (e) {}
-  }
-  
-  return false;
-}
-
-async function checkHost(ip, timeoutMs = 400) {
-  try {
-    // Ưu tiên check port trước (nhanh hơn ping 3-5 lần)
-    // Chỉ ping nếu không có port nào mở
-    
-    const portChecks = [
-      checkHostPort(ip, 80, timeoutMs),    // HTTP
-      checkHostPort(ip, 443, timeoutMs),   // HTTPS
-      checkHostPort(ip, 3389, timeoutMs),  // RDP
-    ];
-
-    // Race: port nào respond trước thì return ngay
-    try {
-      await Promise.any(portChecks);
-      return true;
-    } catch (e) {
-      // Không có port nào mở, thử ping
-      const pingResult = await ping.promise.probe(ip, {
-        timeout: timeoutMs / 1000,
-        min_reply: 1,
-      });
-      return pingResult && pingResult.alive;
-    }
-  } catch (e) {
-    return false;
-  }
-}
-
-function checkHostPort(ip, port, timeout = 400) {
-  return new Promise((resolve, reject) => {
-    const socket = new net.Socket();
-    let done = false;
-
-    socket.setTimeout(timeout);
-    socket.setNoDelay(true);
-
-    const cleanup = (success) => {
-      if (!done) {
-        done = true;
-        try {
-          socket.destroy();
-        } catch (e) {}
-        success ? resolve(true) : reject(new Error("failed"));
-      }
-    };
-
-    socket.once("connect", () => cleanup(true));
-    socket.once("timeout", () => cleanup(false));
-    socket.once("error", () => cleanup(false));
-
-    try {
-      socket.connect(port, ip);
-    } catch (e) {
-      cleanup(false);
-    }
-  });
-}
-
-// ===================== DISCOVER (2 GIÂY, ĐỘ CHÍNH XÁC CAO) =====================
+// Discover
 app.post("/api/discover", async (req, res) => {
   try {
     const { range, concurrency } = req.body || {};
-    
-    // Tăng concurrency để nhanh hơn nhưng vẫn ổn định
     const ipConcurrency = parseInt(concurrency, 10) || 100;
     const limit = pLimitFactory(ipConcurrency);
-
     const pool = await poolWEB;
     const devices = [];
 
-    console.log(`🔍 Bắt đầu quét với concurrency: ${ipConcurrency} (Nhanh & Chính xác)`);
+    console.log(`🔍 Bắt đầu quét với concurrency: ${ipConcurrency}`);
     const startTime = Date.now();
 
     if (!range || range.trim() === "") {
-      // Quét tất cả devices trong DB
       const result = await pool.request().query(`
         SELECT TOP (1000) [id], [name], [type], [ip], [dep], [note], [status], [port], [date], [userid], [link]
         FROM devices
@@ -458,11 +320,9 @@ app.post("/api/discover", async (req, res) => {
           let alive = false;
           try {
             if (d.port && d.port > 0) {
-              // Có port cụ thể: check nhanh với retry thông minh
               try {
                 alive = await checkHostPort(d.ip, d.port, 400);
               } catch (e) {
-                // Retry 1 lần với timeout dài hơn
                 try {
                   alive = await checkHostPort(d.ip, d.port, 700);
                 } catch (e2) {
@@ -470,7 +330,6 @@ app.post("/api/discover", async (req, res) => {
                 }
               }
             } else {
-              // Không có port: check đầy đủ với adaptive retry
               alive = await checkHostWithRetry(d.ip, 1);
             }
           } catch (e) {
@@ -489,10 +348,8 @@ app.post("/api/discover", async (req, res) => {
       const updated = await Promise.all(checks);
       devices.push(...updated);
 
-      // Batch update DB - async không chặn response
       if (statusUpdates.size > 0) {
         setImmediate(async () => {
-          const updateStart = Date.now();
           try {
             const updatePromises = [];
             for (const [id, status] of statusUpdates.entries()) {
@@ -508,17 +365,12 @@ app.post("/api/discover", async (req, res) => {
               );
             }
             await Promise.all(updatePromises);
-            const updateTime = ((Date.now() - updateStart) / 1000).toFixed(2);
-            console.log(
-              `📝 Đã cập nhật ${statusUpdates.size} devices vào DB trong ${updateTime}s`
-            );
           } catch (e) {
             console.error("Batch update error:", e);
           }
         });
       }
     } else {
-      // Quét range IP
       const parts = range.split(".");
       if (parts.length !== 4) throw new Error("Range không hợp lệ");
       const prefix = parts.slice(0, 3).join(".");
@@ -539,9 +391,8 @@ app.post("/api/discover", async (req, res) => {
         const ipAddr = `${prefix}.${i}`;
         tasks.push(
           limit(async () => {
-            // Adaptive retry
             const alive = await checkHostWithRetry(ipAddr, 1);
-            
+
             const dbCheck = await pool
               .request()
               .input("ip", sql.NVarChar, ipAddr)
@@ -586,7 +437,7 @@ app.post("/api/discover", async (req, res) => {
   }
 });
 
-// ===================== EXPORT EXCEL =====================
+// Export Excel
 app.get("/api/devices/export", async (req, res) => {
   try {
     const {
@@ -676,7 +527,7 @@ app.get("/api/devices/export", async (req, res) => {
   }
 });
 
-// ===================== IMPORT EXCEL =====================
+// Import Excel
 app.post("/api/devices/import", upload.single("file"), async (req, res) => {
   if (!req.file) {
     return res
@@ -816,61 +667,116 @@ app.post("/api/devices/import", upload.single("file"), async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 });
-// GET danh sách lines với tên custom
+
+// ===================== QC LINES API =====================
+
+async function initQCLinesTable() {
+  try {
+    const pool = await poolWEB;
+
+    const checkTable = await pool.request().query(`
+      SELECT * FROM INFORMATION_SCHEMA.TABLES 
+      WHERE TABLE_NAME = 'qc_lines'
+    `);
+
+    if (checkTable.recordset.length === 0) {
+      throw new Error("❌ qc_lines chưa tồn tại – phải tạo bằng SQL chuẩn trước");
+    }
+
+    const checkPort = await pool.request().query(`
+      SELECT * FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_NAME = 'qc_lines' AND COLUMN_NAME = 'port'
+    `);
+
+    if (checkPort.recordset.length === 0) {
+      throw new Error("❌ qc_lines thiếu cột port – KHÔNG CHO PHÉP");
+    }
+
+    console.log("✅ qc_lines OK (port + display_order đã tồn tại)");
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1); // ❌ chết luôn nếu sai cấu trúc
+  }
+}
+
+
+initQCLinesTable();
+
+// GET danh sách lines (sắp xếp theo display_order)
 app.get("/api/qc-lines", async (req, res) => {
   try {
     const pool = await poolWEB;
-    const result = await pool.request().query(`
-      SELECT [line_number], [line_name], [updated_at]
+    const rs = await pool.request().query(`
+      SELECT line_number, line_name, port, display_order
       FROM qc_lines
-      ORDER BY line_number
+      ORDER BY display_order
     `);
-    res.json(result.recordset);
+    res.json(rs.recordset);
   } catch (err) {
-    console.error("❌ GET /api/qc-lines error:", err);
     res.status(500).send(err.message);
   }
 });
 
-// UPDATE tên line
+
+// UPDATE thứ tự hiển thị (reorder) - ĐẶT TRƯỚC route có :lineNumber
+app.put("/api/qc-lines/reorder", async (req, res) => {
+  const { orders } = req.body;
+
+  try {
+    const pool = await poolWEB;
+
+    for (const o of orders) {
+      await pool.request()
+        .input("line", sql.Int, o.line_number)
+        .input("order", sql.Int, o.display_order)
+        .query(`
+          UPDATE qc_lines
+          SET display_order = @order, updated_at = GETDATE()
+          WHERE line_number = @line
+        `);
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// UPDATE tên line - ĐẶT SAU route /reorder
 app.put("/api/qc-lines/:lineNumber", async (req, res) => {
   const { lineNumber } = req.params;
   const { lineName } = req.body;
-  
+
   try {
     const pool = await poolWEB;
-    
-    // Kiểm tra xem line đã tồn tại chưa
+
     const checkResult = await pool
       .request()
-      .input("lineNumber", sql.Int, lineNumber)
+      .input("lineNumber", sql.Int, parseInt(lineNumber))
       .query("SELECT line_number FROM qc_lines WHERE line_number = @lineNumber");
-    
+
     if (checkResult.recordset.length > 0) {
-      // UPDATE nếu đã tồn tại
       await pool
         .request()
-        .input("lineNumber", sql.Int, lineNumber)
+        .input("lineNumber", sql.Int, parseInt(lineNumber))
         .input("lineName", sql.NVarChar, lineName)
-        .input("updatedAt", sql.DateTime, new Date())
-        .query(`
+        .input("updatedAt", sql.DateTime, new Date()).query(`
           UPDATE qc_lines 
           SET line_name = @lineName, updated_at = @updatedAt
           WHERE line_number = @lineNumber
         `);
     } else {
-      // INSERT nếu chưa tồn tại
       await pool
         .request()
-        .input("lineNumber", sql.Int, lineNumber)
+        .input("lineNumber", sql.Int, parseInt(lineNumber))
         .input("lineName", sql.NVarChar, lineName)
-        .input("updatedAt", sql.DateTime, new Date())
-        .query(`
-          INSERT INTO qc_lines (line_number, line_name, updated_at)
-          VALUES (@lineNumber, @lineName, @updatedAt)
+        .input("displayOrder", sql.Int, parseInt(lineNumber))
+        .input("updatedAt", sql.DateTime, new Date()).query(`
+          INSERT INTO qc_lines (line_number, line_name, display_order, updated_at)
+          VALUES (@lineNumber, @lineName, @displayOrder, @updatedAt)
         `);
     }
-    
+
     res.json({ success: true, message: "Cập nhật thành công" });
   } catch (err) {
     console.error("❌ Update QC line error:", err);
@@ -878,12 +784,10 @@ app.put("/api/qc-lines/:lineNumber", async (req, res) => {
   }
 });
 
+// ===================== QC CONTROL API - DÙNG DISPLAY_ORDER =====================
 
-
-
-
-function getUrl(line, qc, ledId = 0, action = null) {
-  const port = 1000 + (line - 1) * 3 + qc;
+// Hàm getUrl - tính port theo display_order
+function buildUrl(port, ledId = 0) {
   if (ledId === 0) {
     return `http://192.168.71.254:${port}/andon/led/0/off`;
   }
@@ -892,25 +796,54 @@ function getUrl(line, qc, ledId = 0, action = null) {
 
 app.get("/api/run/:code", async (req, res) => {
   const { code } = req.params;
-  const id = req.query.id ? parseInt(req.query.id) : 0;
+  const ledId = req.query.id ? parseInt(req.query.id) : 0;
 
   const match = code.match(/^l(\d+)q(\d+)$/i);
   if (!match) return res.status(400).send("Code không hợp lệ");
 
-  const line = parseInt(match[1]);
+  const lineNumber = parseInt(match[1]);
   const qc = parseInt(match[2]);
-
-  const url = getUrl(line, qc, id);
-  console.log("→ line:", line, "qc:", qc, "id:", id);
-  console.log("Gọi API nội bộ:", url);
+  if (qc < 1 || qc > 3) return res.status(400).send("QC chỉ 1–3");
 
   try {
-    const r = await fetch(url);
-    const data = await r.text();
-    res.send(data);
+    const pool = await poolWEB;
+    const rs = await pool.request()
+      .input("line", sql.Int, lineNumber)
+      .query(`
+        SELECT line_name, port
+        FROM qc_lines
+        WHERE line_number = @line
+      `);
+
+    if (rs.recordset.length === 0)
+      return res.status(404).send("Line không tồn tại");
+
+    const { line_name, port: basePort } = rs.recordset[0];
+    const finalPort = basePort + (qc - 1);
+    const url = buildUrl(finalPort, ledId);
+
+    console.log(`QC RUN → ${line_name} | Port ${finalPort}`);
+
+    // ✅ Thêm timeout 3s và handle lỗi
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+
+    try {
+      const r = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeout);
+      const text = await r.text();
+      res.send(text);
+    } catch (fetchErr) {
+      clearTimeout(timeout);
+      if (fetchErr.name === 'AbortError') {
+        console.error(`⏱️ Timeout kết nối port ${finalPort}`);
+        return res.status(504).send(`Timeout - Không kết nối được port ${finalPort}`);
+      }
+      throw fetchErr;
+    }
   } catch (err) {
-    console.log(err);
-    res.status(500).send("Error calling internal API");
+    console.error(`❌ Lỗi QC ${code}:`, err.message);
+    res.status(500).send("Lỗi gọi Andon: " + err.message);
   }
 });
 
@@ -918,5 +851,6 @@ app.get("/api/run/:code", async (req, res) => {
 app.listen(5501, () => {
   console.log("🚀 Server LAN: 5501");
   console.log(`⚡ IP Concurrency: ${DEFAULT_IP_CONCURRENCY}`);
-  console.log("📊 Mode: ĐỘ CHÍNH XÁC 100% (Chậm hơn nhưng chính xác)");
+  console.log("📊 Mode: ĐỘ CHÍNH XÁC 100%");
+  console.log("🔌 QC Port: LẤY TỪ DATABASE (CỐ ĐỊNH)");
 });
