@@ -816,6 +816,71 @@ app.post("/api/devices/import", upload.single("file"), async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 });
+// GET danh sách lines với tên custom
+app.get("/api/qc-lines", async (req, res) => {
+  try {
+    const pool = await poolWEB;
+    const result = await pool.request().query(`
+      SELECT [line_number], [line_name], [updated_at]
+      FROM qc_lines
+      ORDER BY line_number
+    `);
+    res.json(result.recordset);
+  } catch (err) {
+    console.error("❌ GET /api/qc-lines error:", err);
+    res.status(500).send(err.message);
+  }
+});
+
+// UPDATE tên line
+app.put("/api/qc-lines/:lineNumber", async (req, res) => {
+  const { lineNumber } = req.params;
+  const { lineName } = req.body;
+  
+  try {
+    const pool = await poolWEB;
+    
+    // Kiểm tra xem line đã tồn tại chưa
+    const checkResult = await pool
+      .request()
+      .input("lineNumber", sql.Int, lineNumber)
+      .query("SELECT line_number FROM qc_lines WHERE line_number = @lineNumber");
+    
+    if (checkResult.recordset.length > 0) {
+      // UPDATE nếu đã tồn tại
+      await pool
+        .request()
+        .input("lineNumber", sql.Int, lineNumber)
+        .input("lineName", sql.NVarChar, lineName)
+        .input("updatedAt", sql.DateTime, new Date())
+        .query(`
+          UPDATE qc_lines 
+          SET line_name = @lineName, updated_at = @updatedAt
+          WHERE line_number = @lineNumber
+        `);
+    } else {
+      // INSERT nếu chưa tồn tại
+      await pool
+        .request()
+        .input("lineNumber", sql.Int, lineNumber)
+        .input("lineName", sql.NVarChar, lineName)
+        .input("updatedAt", sql.DateTime, new Date())
+        .query(`
+          INSERT INTO qc_lines (line_number, line_name, updated_at)
+          VALUES (@lineNumber, @lineName, @updatedAt)
+        `);
+    }
+    
+    res.json({ success: true, message: "Cập nhật thành công" });
+  } catch (err) {
+    console.error("❌ Update QC line error:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+
+
+
 
 function getUrl(line, qc, ledId = 0, action = null) {
   const port = 1000 + (line - 1) * 3 + qc;
