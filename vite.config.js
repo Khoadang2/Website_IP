@@ -53,7 +53,7 @@ class LDAPService {
         resolve(this.client);
       });
 
-      // ✅ XỬ LÝ LỖI RECONNECT Tự Động
+      // ✅ XỬ LÝ LỖI RECONNECT TỰ ĐỘNG
       this.client.on('error', async (err) => {
         logger.error('LDAP client error:', err);
         this.isConnected = false;
@@ -85,7 +85,7 @@ class LDAPService {
   }
 
   /**
-   * 🔍 TÌMN USER - CÓ RETRY
+   * 🔍 TÌM DN USER - CÓ RETRY
    */
   async findUserDN(username) {
     let retries = 2;
@@ -140,97 +140,104 @@ class LDAPService {
   }
 
   /**
-   * 🔍 KIỂM TRA ĐỘ MẠNH PASSWORD - CHỈ KIỂM TRA KHÔNG RỖNG
+   * 🔐 KIỂM TRA ĐỘ MẠNH PASSWORD
    */
   validatePasswordStrength(password) {
     if (!password || password.length === 0) {
       return { valid: false, message: 'Mật khẩu không được để trống' };
     }
 
-    // ✅ CHO PHÉP BẤT KỲ MẬT KHẨU NÀO (BỎ KIỂM TRA ĐỘ DÀI)
+    if (password.length < 6) {
+      return { valid: false, message: 'Mật khẩu phải có ít nhất 6 ký tự' };
+    }
+
     return { valid: true, message: '' };
   }
 
   /**
-   * 🔐 ADMIN RESET PASSWORD - BỎ QUA LỖI WILL_NOT_PERFORM
+   * 🔐 ADMIN RESET PASSWORD - CÓ RETRY
    */
-  async adminResetPassword(username, newPassword, note = '') {
-    const validation = this.validatePasswordStrength(newPassword);
-    if (!validation.valid) {
-      throw new Error(validation.message);
-    }
+ async adminResetPassword(username, newPassword, note = '') {
+  const validation = this.validatePasswordStrength(newPassword);
+  if (!validation.valid) {
+    throw new Error(validation.message);
+  }
 
-    const userDN = await this.findUserDN(username);
-    await this.connect();
+  // 1️⃣ Tìm DN user
+  const userDN = await this.findUserDN(username);
 
-    const encodedPwd = Buffer.from(`"${newPassword}"`, 'utf16le');
+  // 2️⃣ Kết nối LDAP (bind bằng admin)
+  await this.connect();
 
-    // 1️⃣ RESET PASSWORD
-    await new Promise((resolve, reject) => {
-      this.client.modify(userDN, [
-        new ldap.Change({
-          operation: 'replace',
-          modification: {
-            unicodePwd: encodedPwd
-          }
-        })
-      ], (err) => {
+  // 3️⃣ Encode password chuẩn AD
+  const encodedPwd = Buffer.from(`"${newPassword}"`, 'utf16le');
+
+  // 4️⃣ Reset password
+  await new Promise((resolve, reject) => {
+    this.client.modify(
+      userDN,
+      new ldap.Change({
+        operation: 'replace',
+        modification: {
+          unicodePwd: encodedPwd
+        }
+      }),
+      (err) => {
         if (err) {
-          logger.error('❌ Reset password error:', err.message);
-          
-          // ✅ BỎ QUA LỖI WILL_NOT_PERFORM (CODE 53)
-          if (err.code === 53 || err.message.includes('WILL_NOT_PERFORM')) {
-            logger.warn('⚠️ WILL_NOT_PERFORM error bypassed - returning success');
-            return resolve(); // ✅ BYPASS: Trả về success
+          logger.error('❌ Reset password failed', {
+            user: username,
+            dn: userDN,
+            code: err.code,
+            message: err.message
+          });
+
+          // ❌ Quyền không đủ
+          if (err.code === 50) {
+            return reject(new Error('Không đủ quyền reset password'));
           }
-          
-          // ✅ BỎ QUA LỖI VI PHẠM PASSWORD POLICY (CODE 19)
-          if (err.code === 19 || err.message.includes('constraint')) {
-            logger.warn('⚠️ Password policy violation bypassed - returning success');
-            return resolve(); // ✅ BYPASS: Trả về success
+
+          // ❌ Vi phạm policy
+          if (err.code === 19) {
+            return reject(new Error('Password không đạt policy domain'));
           }
-          
-          // ❌ CHỈ REJECT LỖI QUYỀN (CODE 50)
-          if (err.code === 50 || err.message.includes('insufficient')) {
-            return reject(new Error('Không đủ quyền'));
+
+          // ❌ LDAPS / AD từ chối
+          if (err.code === 53) {
+            return reject(new Error('Active Directory từ chối reset password (WILL_NOT_PERFORM)'));
           }
-          
-          // ❌ LỖI KHÁC
+
           return reject(err);
         }
-        
-        // ✅ THÀNH CÔNG THỰC SỰ
+
+        logger.info(`✅ Password reset OK for ${username}`);
         resolve();
-      });
-    });
-
-    // 2️⃣ UPDATE DESCRIPTION (NẾU CÓ)
-    if (note && note.trim() !== '') {
-      try {
-        await new Promise((resolve, reject) => {
-          this.client.modify(userDN, [
-            new ldap.Change({
-              operation: 'replace',
-              modification: {
-                description: note
-              }
-            })
-          ], (err) => {
-            if (err) {
-              logger.error('Update description failed:', err);
-              // ✅ KHÔNG REJECT, CHỈ LOG
-              return resolve();
-            }
-            resolve();
-          });
-        });
-      } catch (e) {
-        logger.warn('Description update skipped:', e.message);
       }
-    }
+    );
+  });
 
-    return { success: true };
+  // 5️⃣ Update description (không ảnh hưởng kết quả reset)
+  if (note && note.trim()) {
+    try {
+      await new Promise((resolve) => {
+        this.client.modify(
+          userDN,
+          new ldap.Change({
+            operation: 'replace',
+            modification: { description: note }
+          }),
+          () => resolve()
+        );
+      });
+    } catch (e) {
+      logger.warn('⚠️ Update description failed:', e.message);
+    }
   }
+
+  return {
+    success: true,
+    message: 'Reset password thành công'
+  };
+}
 
   /**
    * 🔍 TÌM KIẾM USERS - CÓ RETRY
