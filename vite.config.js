@@ -157,32 +157,40 @@ class LDAPService {
   /**
    * 🔐 ADMIN RESET PASSWORD - CÓ RETRY
    */
- async adminResetPassword(username, newPassword, note = '') {
-  const validation = this.validatePasswordStrength(newPassword);
-  if (!validation.valid) {
-    throw new Error(validation.message);
-  }
+  async adminResetPassword(username, newPassword, note = '') {
+    const validation = this.validatePasswordStrength(newPassword);
+    if (!validation.valid) {
+      throw new Error(validation.message);
+    }
 
-  // 1️⃣ Tìm DN user
-  const userDN = await this.findUserDN(username);
+    // 1️⃣ Tìm DN user
+    const userDN = await this.findUserDN(username);
 
-  // 2️⃣ Kết nối LDAP (bind bằng admin)
-  await this.connect();
+    // 2️⃣ Kết nối LDAP (bind bằng admin)
+    await this.connect();
 
-  // 3️⃣ Encode password chuẩn AD
-  const encodedPwd = Buffer.from(`"${newPassword}"`, 'utf16le');
+    // 3️⃣ Encode password chuẩn AD
+    const encodedPwd = Buffer.from(`"${newPassword}"`, 'utf16le');
 
-  // 4️⃣ Reset password
-  await new Promise((resolve, reject) => {
-    this.client.modify(
-      userDN,
+    // 4️⃣ Reset password + Force user change at next logon (set pwdLastSet = 0)
+    // Sử dụng array of changes để modify nhiều attributes cùng lúc
+    const changes = [
       new ldap.Change({
         operation: 'replace',
         modification: {
           unicodePwd: encodedPwd
         }
       }),
-      (err) => {
+      new ldap.Change({
+        operation: 'replace',
+        modification: {
+          pwdLastSet: '0'  // ✅ Force user phải đổi mật khẩu tại lần đăng nhập tiếp theo, ngăn chặn dùng mật khẩu cũ/mới mà không đổi
+        }
+      })
+    ];
+
+    await new Promise((resolve, reject) => {
+      this.client.modify(userDN, changes, (err) => {
         if (err) {
           logger.error('❌ Reset password failed', {
             user: username,
@@ -209,35 +217,65 @@ class LDAPService {
           return reject(err);
         }
 
-        logger.info(`✅ Password reset OK for ${username}`);
+        logger.info(`✅ Password reset OK for ${username} (forced change at next logon)`);
         resolve();
-      }
-    );
-  });
-
-  // 5️⃣ Update description (không ảnh hưởng kết quả reset)
-  if (note && note.trim()) {
-    try {
-      await new Promise((resolve) => {
-        this.client.modify(
-          userDN,
-          new ldap.Change({
-            operation: 'replace',
-            modification: { description: note }
-          }),
-          () => resolve()
-        );
       });
-    } catch (e) {
-      logger.warn('⚠️ Update description failed:', e.message);
-    }
-  }
+    });
 
-  return {
-    success: true,
-    message: 'Reset password thành công'
-  };
-}
+    // 5️⃣ Validate reset bằng cách thử bind với mật khẩu mới (confirm thành công)
+    try {
+      const domain = config.baseDN
+        .split(',')
+        .filter(part => part.startsWith('DC='))
+        .map(part => part.replace('DC=', ''))
+        .join('.');
+      const upn = `${username}@${domain}`;
+
+      const testClient = ldap.createClient({
+        url: config.url,
+        timeout: 5000,  // Timeout ngắn cho test
+        tlsOptions: config.tlsOptions
+      });
+
+      await new Promise((resolve, reject) => {
+        testClient.bind(upn, newPassword, (err) => {
+          testClient.unbind();
+          if (err) {
+            logger.error('❌ Password reset validation failed (bind test failed)');
+            reject(new Error('Reset mật khẩu thất bại - không thể xác thực'));
+          } else {
+            logger.info('✅ Password reset validated successfully');
+            resolve();
+          }
+        });
+      });
+    } catch (validationError) {
+      throw validationError;
+    }
+
+    // 6️⃣ Update description (lưu chính note - mật khẩu mới vừa nhập)
+    if (note && note.trim()) {
+      try {
+        await new Promise((resolve) => {
+          this.client.modify(
+            userDN,
+            new ldap.Change({
+              operation: 'replace',
+              modification: { description: note }  // ✅ Lưu chính mật khẩu mới vào description
+            }),
+            () => resolve()
+          );
+        });
+      } catch (e) {
+        logger.warn('⚠️ Update description failed:', e.message);
+      }
+    }
+
+    return {
+      success: true,
+      message: 'Reset password thành công, user phải đổi mật khẩu tại lần đăng nhập tiếp theo'
+    };
+  }
 
   /**
    * 🔍 TÌM KIẾM USERS - CÓ RETRY
