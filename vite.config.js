@@ -1,535 +1,108 @@
-const ldap = require('ldapjs');
+const ldapService = require('../services/ldap.service');
 const logger = require('../utils/logger');
-const config = require('../config/ldap');
+const { sanitizeSQLInput } = require('../utils/sanitizer');
 
-class LDAPService {
-  constructor() {
-    this.client = null;
-    this.isConnected = false;
-    this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = 3;
-    this.reconnectDelay = 2000;
-  }
-
+class PasswordController {
   /**
-   * 🔌 KẾT NỐI LDAP (LDAPS BẮT BUỘC) - CÓ AUTO RECONNECT
+   * 🔐 RESET PASSWORD
+   * POST /api/password/reset
+   * Body: { username, newPassword, confirmPassword, note }
    */
-  async connect() {
-    if (this.isConnected && this.client) {
-      return this.client;
-    }
+  async resetPassword(req, res) {
+    try {
+      const { username, newPassword, confirmPassword, note } = req.body;
 
-    return new Promise((resolve, reject) => {
-      // Đóng client cũ nếu có
-      if (this.client) {
-        try {
-          this.client.unbind(() => {});
-        } catch (e) {
-          logger.warn('Failed to unbind old client:', e.message);
-        }
-        this.client = null;
+      // =============================
+      // VALIDATION
+      // =============================
+      if (!username || !newPassword || !confirmPassword) {
+        return res.status(400).json({
+          success: false,
+          message: 'Thiếu thông tin bắt buộc'
+        });
       }
 
-      this.client = ldap.createClient({
-        url: config.url,
-        tlsOptions: config.tlsOptions,
-        timeout: config.timeout,
-        connectTimeout: config.connectTimeout,
-        idleTimeout: config.idleTimeout,
-        reconnect: true // ✅ BẬT AUTO RECONNECT
-      });
+      const cleanUsername = sanitizeSQLInput(username.trim());
+      const cleanNewPwd = newPassword.trim();
+      const cleanConfirmPwd = confirmPassword.trim();
 
-      this.client.bind(config.bindDN, config.bindPassword, (err) => {
-        if (err) {
-          logger.error('❌ LDAP bind failed:', err);
-          this.isConnected = false;
-          this.client = null;
-          return reject(new Error('Không thể bind LDAP: ' + err.message));
-        }
-
-        this.isConnected = true;
-        this.reconnectAttempts = 0;
-        logger.info('✅ LDAP connected (LDAPS)');
-        resolve(this.client);
-      });
-
-      // ✅ XỬ LÝ LỖI RECONNECT TỰ ĐỘNG
-      this.client.on('error', async (err) => {
-        logger.error('LDAP client error:', err);
-        this.isConnected = false;
-
-        // Nếu là lỗi connection reset, thử reconnect
-        if (err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT') {
-          if (this.reconnectAttempts < this.maxReconnectAttempts) {
-            this.reconnectAttempts++;
-            logger.warn(`🔄 Attempting reconnect ${this.reconnectAttempts}/${this.maxReconnectAttempts}...`);
-            
-            setTimeout(async () => {
-              try {
-                await this.connect();
-                logger.info('✅ Reconnected successfully');
-              } catch (e) {
-                logger.error('❌ Reconnect failed:', e.message);
-              }
-            }, this.reconnectDelay * this.reconnectAttempts);
-          }
-        }
-      });
-
-      // ✅ XỬ LÝ KHI CONNECTION ĐÓNG
-      this.client.on('close', () => {
-        logger.warn('⚠️ LDAP connection closed');
-        this.isConnected = false;
-      });
-    });
-  }
-
-  /**
-   * 🔍 TÌM DN USER - CÓ RETRY
-   */
-  async findUserDN(username) {
-    let retries = 2;
-    let lastError;
-
-    while (retries > 0) {
-      try {
-        await this.connect();
-
-        return await new Promise((resolve, reject) => {
-          const opts = {
-            scope: 'sub',
-            filter: `(&(objectClass=user)(objectCategory=person)(sAMAccountName=${username}))`,
-            attributes: ['distinguishedName']
-          };
-
-          let userDN = null;
-
-          this.client.search(config.baseDN, opts, (err, res) => {
-            if (err) {
-              return reject(err);
-            }
-
-            res.on('searchEntry', (entry) => {
-              userDN = entry.objectName;
-            });
-
-            res.on('error', (err) => reject(err));
-
-            res.on('end', () => {
-              if (!userDN) {
-                reject(new Error('Không tìm thấy user trong domain'));
-              } else {
-                resolve(userDN);
-              }
-            });
-          });
+      if (cleanNewPwd !== cleanConfirmPwd) {
+        return res.status(400).json({
+          success: false,
+          message: 'Mật khẩu mới và xác nhận không khớp'
         });
-      } catch (error) {
-        lastError = error;
-        retries--;
-        
-        if (retries > 0) {
-          logger.warn(`Retry findUserDN, ${retries} attempts left`);
-          this.isConnected = false;
-          await new Promise(r => setTimeout(r, 1000));
-        }
       }
-    }
 
-    throw lastError;
-  }
-
-  /**
-   * 🔐 KIỂM TRA ĐỘ MẠNH PASSWORD
-   */
-  validatePasswordStrength(password) {
-    if (!password || password.length === 0) {
-      return { valid: false, message: 'Mật khẩu không được để trống' };
-    }
-
-    if (password.length < 6) {
-      return { valid: false, message: 'Mật khẩu phải có ít nhất 6 ký tự' };
-    }
-
-    return { valid: true, message: '' };
-  }
-
-  /**
-   * 🔐 ADMIN RESET PASSWORD - CÓ RETRY
-   */
-  async adminResetPassword(username, newPassword, note = '') {
-    const validation = this.validatePasswordStrength(newPassword);
-    if (!validation.valid) {
-      throw new Error(validation.message);
-    }
-
-    // 1️⃣ Tìm DN user
-    const userDN = await this.findUserDN(username);
-
-    // 2️⃣ Kết nối LDAP (bind bằng admin)
-    await this.connect();
-
-    // 3️⃣ Encode password chuẩn AD
-    const encodedPwd = Buffer.from(`"${newPassword}"`, 'utf16le');
-
-    // 4️⃣ Reset password + Force user change at next logon (set pwdLastSet = 0)
-    // Sử dụng array of changes để modify nhiều attributes cùng lúc
-    const changes = [
-      new ldap.Change({
-        operation: 'replace',
-        modification: {
-          unicodePwd: encodedPwd
-        }
-      }),
-      new ldap.Change({
-        operation: 'replace',
-        modification: {
-          pwdLastSet: '0'  // ✅ Force user phải đổi mật khẩu tại lần đăng nhập tiếp theo, ngăn chặn dùng mật khẩu cũ/mới mà không đổi
-        }
-      })
-    ];
-
-    await new Promise((resolve, reject) => {
-      this.client.modify(userDN, changes, (err) => {
-        if (err) {
-          logger.error('❌ Reset password failed', {
-            user: username,
-            dn: userDN,
-            code: err.code,
-            message: err.message
-          });
-
-          // ❌ Quyền không đủ
-          if (err.code === 50) {
-            return reject(new Error('Không đủ quyền reset password'));
-          }
-
-          // ❌ Vi phạm policy
-          if (err.code === 19) {
-            return reject(new Error('Password không đạt policy domain'));
-          }
-
-          // ❌ LDAPS / AD từ chối
-          if (err.code === 53) {
-            return reject(new Error('Active Directory từ chối reset password (WILL_NOT_PERFORM)'));
-          }
-
-          return reject(err);
-        }
-
-        logger.info(`✅ Password reset OK for ${username} (forced change at next logon)`);
-        resolve();
-      });
-    });
-
-    // 5️⃣ Validate reset bằng cách thử bind với mật khẩu mới (confirm thành công)
-    try {
-      const domain = config.baseDN
-        .split(',')
-        .filter(part => part.startsWith('DC='))
-        .map(part => part.replace('DC=', ''))
-        .join('.');
-      const upn = `${username}@${domain}`;
-
-      const testClient = ldap.createClient({
-        url: config.url,
-        timeout: 5000,  // Timeout ngắn cho test
-        tlsOptions: config.tlsOptions
-      });
-
-      await new Promise((resolve, reject) => {
-        testClient.bind(upn, newPassword, (err) => {
-          testClient.unbind();
-          if (err) {
-            logger.error('❌ Password reset validation failed (bind test failed)');
-            reject(new Error('Reset mật khẩu thất bại - không thể xác thực'));
-          } else {
-            logger.info('✅ Password reset validated successfully');
-            resolve();
-          }
+      const validation = ldapService.validatePasswordStrength(cleanNewPwd);
+      if (!validation.valid) {
+        return res.status(400).json({
+          success: false,
+          message: validation.message
         });
-      });
-    } catch (validationError) {
-      throw validationError;
-    }
-
-    // 6️⃣ Update description (lưu chính note - mật khẩu mới vừa nhập)
-    if (note && note.trim()) {
-      try {
-        await new Promise((resolve) => {
-          this.client.modify(
-            userDN,
-            new ldap.Change({
-              operation: 'replace',
-              modification: { description: note }  // ✅ Lưu chính mật khẩu mới vào description
-            }),
-            () => resolve()
-          );
-        });
-      } catch (e) {
-        logger.warn('⚠️ Update description failed:', e.message);
       }
-    }
 
-    return {
-      success: true,
-      message: 'Reset password thành công, user phải đổi mật khẩu tại lần đăng nhập tiếp theo'
-    };
-  }
+      // =============================
+      // RESET PASSWORD
+      // ✅ FIX: LUÔN LUÔN hiển thị mật khẩu mới (bỏ qua note từ frontend)
+      // =============================
+      const resetNote = cleanNewPwd;
 
-  /**
-   * 🔍 TÌM KIẾM USERS - CÓ RETRY
-   */
-  async search(filter = config.searchOptions.filter, attributes = config.searchOptions.attributes) {
-    let retries = 2;
-    let lastError;
+      const result = await ldapService.adminResetPassword(
+        cleanUsername,
+        cleanNewPwd,
+        resetNote
+      );
 
-    while (retries > 0) {
-      try {
-        await this.connect();
+      logger.info(`✅ Reset password success: ${cleanUsername}`, {
+        username: cleanUsername,
+        timestamp: new Date().toISOString()
+      });
 
-        return await new Promise((resolve, reject) => {
-          const entries = [];
-
-          this.client.search(
-            config.baseDN,
-            {
-              scope: config.searchOptions.scope,
-              filter,
-              attributes,
-              paged: config.searchOptions.paged,
-              sizeLimit: config.searchOptions.sizeLimit
-            },
-            (err, res) => {
-              if (err) {
-                logger.error('LDAP search error:', err);
-                return reject(new Error('Lỗi tìm kiếm LDAP'));
-              }
-
-              res.on('searchEntry', (entry) => {
-                entries.push(entry);
-              });
-
-              res.on('error', (err) => {
-                logger.error('LDAP search stream error:', err);
-                reject(new Error('Lỗi stream LDAP'));
-              });
-
-              res.on('end', () => {
-                logger.info(`LDAP search completed: ${entries.length} entries found`);
-                resolve(entries);
-              });
-            });
-        });
-      } catch (error) {
-        lastError = error;
-        retries--;
-        
-        if (retries > 0) {
-          logger.warn(`Retry search, ${retries} attempts left`);
-          this.isConnected = false;
-          await new Promise(r => setTimeout(r, 1000));
-        }
-      }
-    }
-
-    throw lastError;
-  }
-
-  /**
-   * 📋 LẤY TẤT CẢ USERS
-   */
-  async getAllUsers(isAPITool = false) {
-    try {
-      const entries = await this.search();
-
-      return entries
-        .map(entry => {
-          let attrs = {};
-
-          if (entry.pojo && entry.pojo.attributes) {
-            attrs = entry.pojo.attributes.reduce((acc, attr) => {
-              if (attr.values && attr.values.length > 0) {
-                acc[attr.type] = attr.values[0];
-              }
-              return acc;
-            }, {});
-          } else if (entry.object) {
-            attrs = entry.object;
-          } else if (entry.attributes) {
-            attrs = entry.attributes.reduce((acc, attr) => {
-              if (attr.values && attr.values.length > 0) {
-                acc[attr.type] = attr.values[0];
-              }
-              return acc;
-            }, {});
-          }
-
-          if (isAPITool) {
-            return {
-              username: attrs.sAMAccountName || 'N/A',
-              displayName: attrs.displayName || null
-            };
-          }
-
-          return {
-            username: attrs.sAMAccountName || 'N/A',
-            displayName: attrs.displayName || null,
-            email: attrs.mail || null,
-            phone: attrs.telephoneNumber || null,
-            mobile: attrs.mobile || null,
-            title: attrs.title || null,
-            department: attrs.department || null,
-            company: attrs.company || null,
-            description: attrs.description || 'Không có ghi chú'
-          };
-        })
-        .filter(user => user.username !== 'N/A');
-
-    } catch (error) {
-      logger.error('Error getting LDAP users:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * 🔍 TÌM KIẾM USERS THEO TỪ KHÓA
-   */
-  async searchUsers(query, isAPITool = false) {
-    const filter = `(&(objectClass=user)(objectCategory=person)(|(sAMAccountName=*${query}*)(displayName=*${query}*)(mail=*${query}*)))`;
-
-    try {
-      const entries = await this.search(filter);
-
-      return entries
-        .filter(entry => entry && entry.pojo && entry.pojo.attributes)
-        .map(entry => {
-          const attrs = entry.pojo.attributes.reduce((acc, attr) => {
-            if (attr.values && attr.values.length > 0) {
-              acc[attr.type] = attr.values[0];
-            }
-            return acc;
-          }, {});
-
-          if (isAPITool) {
-            return {
-              username: attrs.sAMAccountName || 'N/A',
-              displayName: attrs.displayName || null
-            };
-          }
-
-          return {
-            username: attrs.sAMAccountName || 'N/A',
-            displayName: attrs.displayName || null,
-            email: attrs.mail || null,
-            phone: attrs.telephoneNumber || null,
-            mobile: attrs.mobile || null,
-            title: attrs.title || null,
-            department: attrs.department || null,
-            company: attrs.company || null,
-            description: attrs.description || 'Không có ghi chú'
-          };
-        })
-        .filter(user => user.username !== 'N/A');
-
-    } catch (error) {
-      logger.error('Error searching LDAP users:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * 🔐 XÁC THỰC USER
-   */
-  async authenticate(username, password) {
-    try {
-      const domain = config.baseDN
-        .split(',')
-        .filter(part => part.startsWith('DC='))
-        .map(part => part.replace('DC=', ''))
-        .join('.');
-
-      const upn = `${username}@${domain}`;
-
-      logger.info(`Attempting authentication for user: ${username}`);
-
-      return new Promise(async (resolve, reject) => {
-        const authClient = ldap.createClient({
-          url: config.url,
-          timeout: config.timeout,
-          connectTimeout: config.connectTimeout,
-          tlsOptions: config.tlsOptions
-        });
-
-        authClient.bind(upn, password, async (err) => {
-          if (!err) {
-            logger.info(`✅ Authentication successful: ${username}`);
-            authClient.unbind();
-            return resolve(true);
-          }
-
-          logger.warn(`UPN auth failed, trying DN lookup...`);
-
-          try {
-            const userDN = await this.findUserDN(username);
-
-            const dnAuthClient = ldap.createClient({
-              url: config.url,
-              timeout: config.timeout,
-              connectTimeout: config.connectTimeout,
-              tlsOptions: config.tlsOptions
-            });
-
-            dnAuthClient.bind(userDN, password, (dnErr) => {
-              dnAuthClient.unbind();
-
-              if (dnErr) {
-                logger.error(`❌ Auth failed: ${username}`);
-                reject(new Error('Invalid Credentials'));
-              } else {
-                logger.info(`✅ Auth successful (DN): ${username}`);
-                resolve(true);
-              }
-            });
-
-          } catch (findErr) {
-            authClient.unbind();
-            logger.error(`❌ User not found: ${username}`);
-            reject(new Error('User not found'));
-          }
-        });
-
-        setTimeout(() => {
-          authClient.unbind();
-          reject(new Error('Authentication timeout'));
-        }, config.timeout);
+      res.json({
+        success: true,
+        message: result.message
       });
 
     } catch (error) {
-      logger.error('Authentication error:', error);
-      throw error;
+      logger.error('❌ Reset password error:', error);
+      res.status(500).json({
+        success: false,
+        message: error.message
+      });
     }
   }
 
   /**
-   * 🔌 ĐÓNG KẾT NỐI
+   * 🔍 VALIDATE PASSWORD STRENGTH
+   * POST /api/password/validate
+   * Body: { password }
    */
-  disconnect() {
-    if (this.client) {
-      try {
-        this.client.unbind((err) => {
-          if (err) {
-            logger.error('Error unbinding LDAP:', err);
-          }
+  async validatePassword(req, res) {
+    try {
+      const { password } = req.body;
+
+      if (!password) {
+        return res.status(400).json({
+          success: false,
+          message: 'Thiếu mật khẩu cần kiểm tra'
         });
-      } catch (e) {
-        logger.warn('Unbind error:', e.message);
       }
-      this.isConnected = false;
-      this.client = null;
-      logger.info('LDAP disconnected');
+
+      const validation = ldapService.validatePasswordStrength(password);
+
+      res.json({
+        success: true,
+        data: validation
+      });
+
+    } catch (error) {
+      logger.error('Validate password error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Lỗi kiểm tra mật khẩu'
+      });
     }
   }
 }
 
-module.exports = new LDAPService();
+module.exports = new PasswordController();
